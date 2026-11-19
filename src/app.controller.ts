@@ -12,17 +12,10 @@ export class AppController {
 
   @Get('database/status')
   async getDatabaseStatus() {
-    const result = await this.dataSource.query(`
-      SELECT COUNT(*) AS total_tablas
-      FROM information_schema.tables
-      WHERE table_schema = 'public'
-        AND table_type = 'BASE TABLE';
-    `);
+    await this.dataSource.query('SELECT 1');
 
     return {
       connected: true,
-      database: 'ganon_portal',
-      totalTables: Number(result[0].total_tablas),
     };
   }
 }

@@ -34,13 +34,47 @@ además de los datos de conexión de PostgreSQL. Las llamadas del navegador usan
 `FRONTEND_ORIGINS` como una lista separada por comas para permitir los orígenes
 del portal.
 
-Antes de habilitar los cálculos OTIF, aplica manualmente
-`migrations/20260603_add_received_item_id.sql` a la base de datos. El backend
-mantiene `synchronize: false` y no ejecuta migraciones al arrancar. Las firmas
-PNG se guardan bajo `EVALUATION_FILES_DIR` (por defecto
+Aplica manualmente `migrations/20260603_add_received_item_id.sql` y
+`migrations/20261118_add_supplier_commitment_responses.sql` a la base de datos.
+El backend mantiene `synchronize: false` y no ejecuta migraciones al arrancar.
+Compras (incluidos los roles Keycloak `auxiliar` y `auxiliar_compras`) selecciona
+los compromisos al crear una evaluación. El proveedor puede aceptarlos con una
+firma digital y comentario, o solicitar una revisión; los borradores con
+compromisos asignados aparecen en su bandeja. Las firmas PNG se guardan bajo `EVALUATION_FILES_DIR` (por defecto
 `storage/evaluations`), que debe persistir y estar respaldado junto con la base.
 Calidad, facturación y devoluciones siguen pendientes de una fuente de datos;
 por ello las evaluaciones nuevas se guardan como borrador sin calificación final.
+
+## Administración de proveedores
+
+El módulo **Proveedores** permite a un administrador registrar un proveedor en
+PostgreSQL y crear automáticamente su cuenta en Keycloak. El correo se usa como
+nombre de usuario cuando se proporciona. Si se omite, se genera un nombre de
+usuario con el formato `proveedor-<UUID>` y se muestra al administrador al
+terminar el registro. La contraseña capturada se crea como temporal; Keycloak
+obliga a cambiarla al primer acceso. La contraseña temporal no se guarda en
+PostgreSQL ni se devuelve por la API después del registro.
+El realm debe permitir nombres de usuario que no sean correos para registrar
+proveedores sin correo.
+
+Para habilitar la creación, configura en el entorno del backend
+`KEYCLOAK_ADMIN_CLIENT_ID` y `KEYCLOAK_ADMIN_CLIENT_SECRET` para un cliente de
+servicio con flujo `client_credentials` habilitado. Asígnale en el cliente
+`realm-management` los permisos `manage-users` y `view-realm`. El cliente se
+autentica en `KEYCLOAK_ADMIN_REALM` (por defecto, el mismo valor de
+`KEYCLOAK_REALM`) y administra usuarios en `KEYCLOAK_REALM`. El rol de proveedor
+se obtiene de `KEYCLOAK_PROVIDER_ROLE` (por defecto, `proveedor`; también se
+acepta el rol `provider` si ese es el nombre existente). Mantén el secreto
+únicamente en el entorno del backend; nunca lo configures en Angular.
+
+El ID de NetSuite es opcional al crear el proveedor y puede actualizarse después
+desde el mismo módulo. La cuenta de Keycloak queda vinculada en `portal_users`
+con el ID interno de `suppliers`; el ID externo de NetSuite se almacena en
+`suppliers.netsuite_vendor_id`. El administrador también puede editar los datos
+del proveedor; al cambiar el correo, se actualizan el correo y el nombre de
+usuario en Keycloak. La acción **Eliminar** es una desactivación lógica: se
+deshabilitan el proveedor y su cuenta de Keycloak sin borrar sus órdenes ni
+evaluaciones. El proveedor puede reactivarse desde el mismo módulo.
 
 ## Project setup
 

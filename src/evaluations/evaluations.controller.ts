@@ -1,13 +1,13 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   Post,
   Query,
   Req,
   UseGuards,
-  ForbiddenException,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { KeycloakAuthGuard } from '../auth/keycloak-auth.guard';
@@ -41,6 +41,36 @@ export class EvaluationsController {
     return this.evaluations.getActiveSuppliers();
   }
 
+    @Get('orders')
+  getPortalOrders(@Req() request: Request) {
+    const user = currentUser(request);
+
+    if (user.role === 'provider') {
+      if (!user.supplierId) {
+        throw new ForbiddenException(
+          'Tu usuario no tiene un proveedor asignado.',
+        );
+      }
+
+      return this.evaluations.getPortalOrders(user.supplierId);
+    }
+
+    requireBuyerOrAdmin(user);
+    return this.evaluations.getPortalOrders();
+  }
+
+  @Get('suppliers/:supplierId/orders')
+  getSupplierOrderHistory(
+    @Req() request: Request,
+    @Param('supplierId') supplierId: string,
+  ) {
+    const user = currentUser(request);
+    if (user.role === 'provider' && String(user.supplierId) !== String(supplierId)) {
+      throw new ForbiddenException('Solo puedes consultar las órdenes de tu proveedor.');
+    }
+    return this.evaluations.getSupplierOrderHistory(supplierId);
+  }
+
   @Get('metrics')
   previewMetrics(
     @Req() request: Request,
@@ -68,5 +98,18 @@ export class EvaluationsController {
   @Get(':id')
   getOne(@Req() request: Request, @Param('id') id: string) {
     return this.evaluations.getEvaluation(id, currentUser(request));
+  }
+
+  @Post(':id/commitment-response')
+  respondToCommitments(
+    @Req() request: Request,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    const user = currentUser(request);
+    if (user.role !== 'provider') {
+      throw new ForbiddenException('Solo el proveedor asignado puede responder los compromisos.');
+    }
+    return this.evaluations.respondToCommitments(id, user, body);
   }
 }

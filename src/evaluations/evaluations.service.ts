@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
@@ -40,6 +41,17 @@ interface PerformanceRow {
   first_items_match: boolean | null;
 }
 
+interface SupplierOrderLineRow {
+  order_id: string;
+  order_date: string;
+  expected_delivery_date: string | null;
+  line_id: string;
+  line_number: string | number;
+  item_id: string | null;
+  ordered_quantity: string;
+  delivered_quantity: string;
+}
+
 interface EvaluationRow {
   id: string;
   supplier_id: string;
@@ -59,6 +71,11 @@ interface EvaluationRow {
   comments: string | null;
   status: string;
   created_at: string;
+  supplier_response_status: string | null;
+  supplier_response_text: string | null;
+  supplier_response_signer_name: string | null;
+  supplier_response_at: string | null;
+  supplier_response_signature_file_path: string | null;
 }
 
 interface EvaluationSignerInput {
@@ -272,6 +289,199 @@ export class EvaluationsService {
     )) as SupplierRow[];
   }
 
+  async getSupplierOrderHistory(supplierId: string): Promise<Record<string, unknown>[]> {
+    await this.requireSupplier(supplierId);
+    const rows = (await this.dataSource.query(
+      `SELECT po.id::text AS order_id,
+              po.order_date::date::text AS order_date,
+              po.expected_delivery_date::date::text AS expected_delivery_date,
+              pol.id::text AS line_id, pol.line_number, pol.item_id::text AS item_id,
+              pol.quantity_ordered::text AS ordered_quantity,
+              COALESCE(
+                SUM(rl.quantity_delivered) FILTER (
+                  WHERE r.receipt_type = 'final' AND r.status IN ('released', 'completed')
+                ), 0
+              )::text AS delivered_quantity
+       FROM purchase_orders po
+       JOIN purchase_order_lines pol ON pol.purchase_order_id = po.id
+       LEFT JOIN receipts r ON r.purchase_order_id = po.id
+       LEFT JOIN receipt_lines rl
+         ON rl.receipt_id = r.id AND rl.purchase_order_line_id = pol.id
+       WHERE po.supplier_id = $1
+       GROUP BY po.id, pol.id
+       ORDER BY po.expected_delivery_date DESC, po.order_date DESC, pol.line_number, pol.id`,
+      [supplierId],
+    )) as SupplierOrderLineRow[];
+    const orders = new Map<string, {
+      id: string;
+      orderDate: string;
+      expectedDeliveryDate: string | null;
+      lines: Array<Record<string, unknown>>;
+    }>();
+    for (const row of rows) {
+      let order = orders.get(row.order_id);
+      if (!order) {
+        order = {
+          id: row.order_id,
+          orderDate: row.order_date,
+          expectedDeliveryDate: row.expected_delivery_date,
+          lines: [],
+        };
+        orders.set(row.order_id, order);
+      }
+      const orderedQuantity = Number(row.ordered_quantity);
+      const deliveredQuantity = Number(row.delivered_quantity);
+      order.lines.push({
+        id: row.line_id,
+        lineNumber: row.line_number,
+        itemId: row.item_id,
+        orderedQuantity,
+        deliveredQuantity,
+        pendingQuantity: Math.max(0, orderedQuantity - deliveredQuantity),
+      });
+    }
+    return [...orders.values()];
+  }
+
+    
+async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
+  if (supplierId) {
+    await this.requireSupplier(supplierId);
+  }
+
+  const rows = (await this.dataSource.query(
+    `
+    SELECT
+      po.id::text AS order_id,
+      po.po_number,
+      po.supplier_id::text AS supplier_id,
+      s.name AS supplier_name,
+      po.order_date::date::text AS order_date,
+      po.expected_delivery_date::date::text AS expected_delivery_date,
+      po.status,
+      po.total_amount::text AS total_amount,
+      po.currency,
+      pol.id::text AS line_id,
+      pol.line_number,
+      pol.item_id::text AS item_id,
+      COALESCE(pol.item_name, pol.item_id::text, '') AS item_name,
+      COALESCE(pol.description, '') AS description,
+      pol.quantity_ordered::text AS quantity_ordered,
+      COALESCE(pol.quantity_received, 0)::text AS quantity_received,
+      pol.unit,
+      pol.unit_price::text AS unit_price,
+      pol.amount::text AS line_amount
+    FROM purchase_orders po
+    JOIN suppliers s ON s.id = po.supplier_id
+    JOIN purchase_order_lines pol ON pol.purchase_order_id = po.id
+    WHERE ($1::uuid IS NULL OR po.supplier_id = $1::uuid)
+    ORDER BY
+      po.expected_delivery_date DESC,
+      po.order_date DESC,
+      po.po_number,
+      pol.line_number,
+      pol.id
+    `,
+    [supplierId || null],
+  )) as Array<{
+    order_id: string;
+    po_number: string;
+    supplier_id: string;
+    supplier_name: string;
+    order_date: string;
+    expected_delivery_date: string | null;
+    status: string;
+    total_amount: string;
+    currency: string;
+    line_id: string;
+    line_number: string | number;
+    item_id: string | null;
+    item_name: string;
+    description: string;
+    quantity_ordered: string;
+    quantity_received: string;
+    unit: string | null;
+    unit_price: string | null;
+    line_amount: string | null;
+  }>;
+
+  const orders = new Map<string, Record<string, unknown>>();
+
+  for (const row of rows) {
+    let order = orders.get(row.order_id);
+
+    if (!order) {
+      order = {
+        id: row.order_id,
+        oc: row.po_number,
+        providerId: row.supplier_id,
+        providerName: row.supplier_name,
+        date: row.expected_delivery_date || row.order_date,
+        orderDate: row.order_date,
+        expectedDeliveryDate: row.expected_delivery_date,
+        amount: Number(row.total_amount),
+        status: row.status,
+        currency: row.currency,
+        lines: [],
+      };
+
+      orders.set(row.order_id, order);
+    }
+
+    const orderedQty = Number(row.quantity_ordered);
+    const receivedQty = Number(row.quantity_received);
+    const pendingQty = Math.max(0, orderedQty - receivedQty);
+
+    (order.lines as Array<Record<string, unknown>>).push({
+      lineId: row.line_id,
+      lineNumber: row.line_number,
+      itemId: row.item_id,
+      sku: row.item_name,
+      description: row.description,
+      orderedQty,
+      receivedQty,
+      pendingQty,
+      fullyReceived: pendingQty === 0,
+      unit: row.unit,
+      unitPrice: row.unit_price === null ? null : Number(row.unit_price),
+      amount: row.line_amount === null ? null : Number(row.line_amount),
+    });
+  }
+
+  for (const order of orders.values()) {
+    const lines = order.lines as Array<Record<string, unknown>>;
+
+    const totalOrdered = lines.reduce(
+      (sum, line) => sum + Number(line.orderedQty || 0),
+      0,
+    );
+
+    const totalReceived = lines.reduce(
+      (sum, line) => sum + Number(line.receivedQty || 0),
+      0,
+    );
+
+    const totalPending = lines.reduce(
+      (sum, line) => sum + Number(line.pendingQty || 0),
+      0,
+    );
+
+    order.totalOrderedQty = totalOrdered;
+    order.totalReceivedQty = totalReceived;
+    order.totalPendingQty = totalPending;
+    order.fullyReceived = totalPending === 0;
+    order.deliveryStatus =
+      totalPending === 0
+        ? 'delivered'
+        : totalReceived > 0
+          ? 'partially_received'
+          : 'pending';
+  }
+
+  return [...orders.values()];
+}
+
+
   async previewMetrics(
     supplierId: string,
     periodType: unknown,
@@ -367,12 +577,21 @@ export class EvaluationsService {
     if (user.role === 'provider') {
       if (!user.supplierId) throw new ForbiddenException('El usuario no tiene proveedor asignado.');
       params.push(user.supplierId);
-      condition = `WHERE e.supplier_id = $1 AND e.status = 'published'`;
+      condition = `WHERE e.supplier_id = $1
+        AND (e.status = 'published' OR (
+          e.status = 'draft' AND EXISTS (
+            SELECT 1 FROM evaluation_commitments ec WHERE ec.evaluation_id = e.id
+          )
+        ))`;
     }
     const rows = (await this.dataSource.query(
       `SELECT e.id, e.supplier_id, s.name AS supplier_name, e.period_type,
               e.period_start, e.period_end, e.evaluation_date, e.reported_by,
-              e.score, e.status, e.created_at
+              e.score, e.status, e.created_at, e.supplier_response_status,
+              e.supplier_response_text, e.supplier_response_signer_name,
+              e.supplier_response_at,
+              EXISTS (SELECT 1 FROM evaluation_commitments ec WHERE ec.evaluation_id = e.id)
+                AS has_commitments
        FROM evaluations e
        JOIN suppliers s ON s.id = e.supplier_id
        ${condition}
@@ -392,8 +611,20 @@ export class EvaluationsService {
       [id],
     )) as EvaluationRow[];
     const evaluation = rows[0];
-    if (!evaluation || (user.role === 'provider' &&
-        (evaluation.supplier_id !== user.supplierId || evaluation.status !== 'published'))) {
+    const hasCommitments = evaluation
+      ? Boolean(
+          (await this.dataSource.query(
+            `SELECT 1 FROM evaluation_commitments WHERE evaluation_id = $1 LIMIT 1`,
+            [id],
+          ))[0],
+        )
+      : false;
+    if (
+      !evaluation ||
+      (user.role === 'provider' &&
+        (evaluation.supplier_id !== user.supplierId ||
+          (evaluation.status !== 'published' && !(evaluation.status === 'draft' && hasCommitments))))
+    ) {
       throw new NotFoundException('No se encontró la evaluación solicitada.');
     }
 
@@ -440,14 +671,104 @@ export class EvaluationsService {
       metrics: metricsFromCriteria(criteria),
       commitments: commitmentRows,
       signers,
+      supplier_response_signature_data: evaluation.supplier_response_signature_file_path
+        ? await this.readSignature(evaluation.supplier_response_signature_file_path)
+        : null,
     };
   }
 
+  async respondToCommitments(
+    id: string,
+    user: PortalAuthUser,
+    value: unknown,
+  ): Promise<Record<string, unknown>> {
+    uuidValue(id, 'La evaluación');
+    if (!isRecord(value)) {
+      throw new BadRequestException('La respuesta a los compromisos no es válida.');
+    }
+    const decision = value.decision;
+    if (decision !== 'accepted' && decision !== 'review_requested') {
+      throw new BadRequestException('Selecciona aceptar los compromisos o solicitar una revisión.');
+    }
+    const responseText = stringValue(value.responseText, 'La respuesta del proveedor', true);
+    if (responseText.length > 2000) {
+      throw new BadRequestException('La respuesta del proveedor no puede exceder 2,000 caracteres.');
+    }
+    const signatureData =
+      value.signatureData === undefined || value.signatureData === null
+        ? ''
+        : stringValue(value.signatureData, 'La firma del proveedor');
+    if (decision === 'accepted' && !signatureData) {
+      throw new BadRequestException('La firma digital es obligatoria para aceptar los compromisos.');
+    }
+    if (decision === 'review_requested' && signatureData) {
+      throw new BadRequestException('La firma solo se requiere para aceptar los compromisos.');
+    }
+    if (signatureData) validateSignature(signatureData, 1);
+
+    const evaluations = (await this.dataSource.query(
+      `SELECT supplier_id, supplier_response_status
+       FROM evaluations WHERE id = $1`,
+      [id],
+    )) as Array<{ supplier_id: string; supplier_response_status: string | null }>;
+    const evaluation = evaluations[0];
+    if (!evaluation || evaluation.supplier_id !== user.supplierId) {
+      throw new NotFoundException('No se encontró la evaluación solicitada.');
+    }
+    if (evaluation.supplier_response_status) {
+      throw new ConflictException('El proveedor ya respondió a estos compromisos.');
+    }
+    const linkedCommitments = (await this.dataSource.query(
+      `SELECT 1 FROM evaluation_commitments WHERE evaluation_id = $1 LIMIT 1`,
+      [id],
+    )) as Array<Record<string, unknown>>;
+    if (!linkedCommitments.length) {
+      throw new BadRequestException('La evaluación no tiene compromisos asignados para responder.');
+    }
+
+    const signatureFilePath = signatureData
+      ? `${id}/supplier-response-${randomUUID()}.png`
+      : null;
+    const signatureFile = signatureFilePath ? resolve(this.filesRoot, signatureFilePath) : null;
+    if (signatureFilePath && signatureFile && !signatureFile.startsWith(`${resolve(this.filesRoot, id)}\\`) &&
+        !signatureFile.startsWith(`${resolve(this.filesRoot, id)}/`)) {
+      throw new BadRequestException('La ruta de la firma no es válida.');
+    }
+    if (signatureFile) {
+      await mkdir(join(this.filesRoot, id), { recursive: true });
+      await writeFile(signatureFile, Buffer.from(signatureData.split(',')[1], 'base64'), {
+        flag: 'wx',
+      });
+    }
+
+    try {
+      const updated = (await this.dataSource.query(
+        `UPDATE evaluations
+         SET supplier_response_status = $3,
+             supplier_response_text = $4,
+             supplier_response_signer_name = $5,
+             supplier_response_signature_file_path = $6,
+             supplier_response_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1 AND supplier_id = $2 AND supplier_response_status IS NULL
+         RETURNING id`,
+        [id, user.supplierId, decision, responseText, user.name, signatureFilePath],
+      )) as Array<{ id: string }>;
+      if (!updated.length) {
+        throw new ConflictException('El proveedor ya respondió a estos compromisos.');
+      }
+    } catch (error) {
+      if (signatureFile) await rm(signatureFile, { force: true });
+      throw error;
+    }
+    return this.getEvaluation(id, user);
+  }
+
   private async requireSupplier(id: string): Promise<SupplierRow> {
-    uuidValue(id, 'El proveedor');
+    const supplierId = stringValue(id, 'El proveedor', true);
     const rows = (await this.dataSource.query(
       `SELECT id, name, email FROM suppliers WHERE id = $1 AND active = TRUE`,
-      [id],
+      [supplierId],
     )) as SupplierRow[];
     if (!rows[0]) throw new NotFoundException('No se encontró el proveedor activo.');
     return rows[0];

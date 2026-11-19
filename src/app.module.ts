@@ -5,6 +5,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 import { SuppliersModule } from './suppliers/suppliers.module';
 import { EvaluationsModule } from './evaluations/evaluations.module';
+import { N8nIntegrationModule } from './integrations/n8n-integration.module';
 
 
 @Module({
@@ -24,6 +25,7 @@ import { EvaluationsModule } from './evaluations/evaluations.module';
     }),
     SuppliersModule,
     EvaluationsModule,
+    N8nIntegrationModule,
   ],
   controllers: [AppController],
 })
