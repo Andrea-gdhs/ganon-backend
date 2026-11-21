@@ -1,4 +1,9 @@
-import { calculateOtifMetrics, PerformanceLine } from './evaluation-metrics';
+import {
+  calculateManualEvaluation,
+  calculateOtifMetrics,
+  ManualEvaluationInputs,
+  PerformanceLine,
+} from './evaluation-metrics';
 
 describe('calculateOtifMetrics', () => {
   it('averages line-based On Time and In Full rates', () => {
@@ -28,6 +33,7 @@ describe('calculateOtifMetrics', () => {
       inFullRate: 1,
       otif: 0.75,
     });
+
   });
 
   it('does not publish In Full or OTIF when received item identity is unknown', () => {
@@ -68,5 +74,50 @@ describe('calculateOtifMetrics', () => {
       inFullRate: null,
       otif: null,
     });
+  });
+});
+
+describe('calculateManualEvaluation', () => {
+  it('matches the example workbook penalty and rounded total', () => {
+    const inputs: ManualEvaluationInputs = {
+      openQualityCases: 0,
+      closedQualityCases: 0,
+      billingIncidents: 3,
+      returnIncidents: 3,
+      criticalityLevel: 'Alto',
+    };
+
+    expect(calculateManualEvaluation(0.94, inputs)).toMatchObject({
+      totalQualityCases: 0,
+      qualityPenalty: 0,
+      billingPenalty: 6,
+      returnPenalty: 30,
+      totalIncidents: 6,
+      incidentPercentage: 64,
+      finalScore: 80,
+      classification: 'Con Riesgo',
+      recommendation: 'Solicitar plan de mejora',
+    });
+  });
+
+  it('keeps the final score pending until all manual sources and OTIF are available', () => {
+    expect(
+      calculateManualEvaluation(0.94, {
+        openQualityCases: 0,
+        closedQualityCases: null,
+        billingIncidents: 0,
+        returnIncidents: 0,
+        criticalityLevel: null,
+      }).finalScore,
+    ).toBeNull();
+    expect(
+      calculateManualEvaluation(null, {
+        openQualityCases: 0,
+        closedQualityCases: 0,
+        billingIncidents: 0,
+        returnIncidents: 0,
+        criticalityLevel: null,
+      }).finalScore,
+    ).toBeNull();
   });
 });

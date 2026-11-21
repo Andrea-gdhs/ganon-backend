@@ -1,4 +1,4 @@
-export type EvaluationRole = 'admin' | 'buyer' | 'provider';
+export type EvaluationRole = 'admin' | 'buyer' | 'cedis' | 'provider';
 
 export interface PortalAuthUser {
   id: string;

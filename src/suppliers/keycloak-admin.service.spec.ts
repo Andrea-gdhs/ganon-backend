@@ -1,3 +1,4 @@
+import { jest } from '@jest/globals';
 import { ConfigService } from '@nestjs/config';
 import { ConflictException } from '@nestjs/common';
 import { KeycloakAdminService } from './keycloak-admin.service';
@@ -32,8 +33,8 @@ describe('KeycloakAdminService', () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
 
     await expect(
-      service.createProviderUser('proveedor@example.com', 'Proveedor Ejemplo', 'Temporal-123'),
-    ).resolves.toEqual({ id: 'user-id', username: 'proveedor@example.com' });
+      service.createProviderUser('flexico', 'proveedor@example.com', 'Proveedor Ejemplo', 'Temporal-123'),
+    ).resolves.toEqual({ id: 'user-id', username: 'flexico' });
 
     const createRequest = fetchMock.mock.calls[2][1] as RequestInit;
     if (typeof createRequest.body !== 'string') {
@@ -41,10 +42,12 @@ describe('KeycloakAdminService', () => {
     }
     const createdUser = JSON.parse(createRequest.body) as {
       username: string;
+      email?: string;
       requiredActions: string[];
       credentials: Array<{ value: string; temporary: boolean }>;
     };
-    expect(createdUser.username).toBe('proveedor@example.com');
+    expect(createdUser.username).toBe('flexico');
+    expect(createdUser.email).toBe('proveedor@example.com');
     expect(createdUser.requiredActions).toContain('UPDATE_PASSWORD');
     expect(createdUser.credentials[0]).toEqual({
       type: 'password',
@@ -59,7 +62,7 @@ describe('KeycloakAdminService', () => {
     expect(JSON.parse(roleRequest.body)).toEqual([{ id: 'role-id', name: 'proveedor' }]);
   });
 
-  it('creates an account without email using a generated username', async () => {
+  it('creates an account without email using the supplied username', async () => {
     fetchMock
       .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'service-token' })))
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'role-id', name: 'proveedor' })))
@@ -69,9 +72,9 @@ describe('KeycloakAdminService', () => {
       }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
 
-    const created = await service.createProviderUser(null, 'Proveedor Ejemplo', 'Temporal-123');
+    const created = await service.createProviderUser('flexico', null, 'Proveedor Ejemplo', 'Temporal-123');
     expect(created.id).toBe('user-id');
-    expect(created.username).toMatch(/^proveedor-[0-9a-f-]{36}$/i);
+    expect(created.username).toBe('flexico');
 
     const createRequest = fetchMock.mock.calls[2][1] as RequestInit;
     if (typeof createRequest.body !== 'string') {
@@ -92,8 +95,9 @@ describe('KeycloakAdminService', () => {
       .mockResolvedValueOnce(new Response(null, { status: 409 }));
 
     await expect(
-      service.createProviderUser('provider@example.com', 'Proveedor Ejemplo', 'Temporal-123'),
+      service.createProviderUser('flexico', 'provider@example.com', 'Proveedor Ejemplo', 'Temporal-123'),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
+

@@ -3,6 +3,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   ForbiddenException,
   Get,
   Param,
@@ -62,6 +63,12 @@ export class SuppliersController {
       throw new BadRequestException('Indica si el proveedor debe quedar activo o inactivo.');
     }
     return this.suppliersService.setActive(id, body.active);
+  }
+
+  @Delete(':id')
+  async delete(@Req() request: Request, @Param('id') id: string): Promise<void> {
+    requireAdmin(currentUser(request));
+    await this.suppliersService.delete(id);
   }
 
   @Patch(':id/netsuite-vendor-id')

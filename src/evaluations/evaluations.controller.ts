@@ -20,8 +20,14 @@ function currentUser(request: Request): PortalAuthUser {
 }
 
 function requireBuyerOrAdmin(user: PortalAuthUser): void {
-  if (user.role === 'provider') {
+  if (user.role !== 'admin' && user.role !== 'buyer') {
     throw new ForbiddenException('Solo Compras puede consultar o crear evaluaciones.');
+  }
+}
+
+function requireSupplierCatalogAccess(user: PortalAuthUser): void {
+  if (user.role !== 'admin' && user.role !== 'buyer' && user.role !== 'cedis') {
+    throw new ForbiddenException('Este usuario no puede consultar el catálogo de proveedores.');
   }
 }
 
@@ -39,6 +45,12 @@ export class EvaluationsController {
   getSuppliers(@Req() request: Request) {
     requireBuyerOrAdmin(currentUser(request));
     return this.evaluations.getActiveSuppliers();
+  }
+
+  @Get('supplier-catalog')
+  getSupplierCatalog(@Req() request: Request) {
+    requireSupplierCatalogAccess(currentUser(request));
+    return this.evaluations.getSupplierCatalog();
   }
 
     @Get('orders')
@@ -65,8 +77,12 @@ export class EvaluationsController {
     @Param('supplierId') supplierId: string,
   ) {
     const user = currentUser(request);
-    if (user.role === 'provider' && String(user.supplierId) !== String(supplierId)) {
-      throw new ForbiddenException('Solo puedes consultar las órdenes de tu proveedor.');
+    if (user.role === 'provider') {
+      if (String(user.supplierId) !== String(supplierId)) {
+        throw new ForbiddenException('Solo puedes consultar las órdenes de tu proveedor.');
+      }
+    } else {
+      requireBuyerOrAdmin(user);
     }
     return this.evaluations.getSupplierOrderHistory(supplierId);
   }
@@ -85,7 +101,9 @@ export class EvaluationsController {
 
   @Get()
   list(@Req() request: Request) {
-    return this.evaluations.listEvaluations(currentUser(request));
+    const user = currentUser(request);
+    if (user.role !== 'provider') requireBuyerOrAdmin(user);
+    return this.evaluations.listEvaluations(user);
   }
 
   @Post()
@@ -97,7 +115,9 @@ export class EvaluationsController {
 
   @Get(':id')
   getOne(@Req() request: Request, @Param('id') id: string) {
-    return this.evaluations.getEvaluation(id, currentUser(request));
+    const user = currentUser(request);
+    if (user.role !== 'provider') requireBuyerOrAdmin(user);
+    return this.evaluations.getEvaluation(id, user);
   }
 
   @Post(':id/commitment-response')

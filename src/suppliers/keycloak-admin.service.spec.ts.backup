@@ -1,0 +1,101 @@
+﻿import { jest } from '@jest/globals';
+import { ConfigService } from '@nestjs/config';
+import { ConflictException } from '@nestjs/common';
+import { KeycloakAdminService } from './keycloak-admin.service';
+
+describe('KeycloakAdminService', () => {
+  let service: KeycloakAdminService;
+  let fetchMock: jest.SpyInstance;
+
+  beforeEach(() => {
+    service = new KeycloakAdminService(new ConfigService({
+      KEYCLOAK_URL: 'http://keycloak.test',
+      KEYCLOAK_REALM: 'ganon',
+      KEYCLOAK_ADMIN_CLIENT_ID: 'portal-service',
+      KEYCLOAK_ADMIN_CLIENT_SECRET: 'test-secret',
+      KEYCLOAK_PROVIDER_ROLE: 'proveedor',
+    }));
+    fetchMock = jest.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('creates a temporary-password account and assigns the provider role', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'service-token' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'role-id', name: 'proveedor' })))
+      .mockResolvedValueOnce(new Response(null, {
+        status: 201,
+        headers: { location: 'http://keycloak.test/admin/realms/ganon/users/user-id' },
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    await expect(
+      service.createProviderUser('proveedor@example.com', 'Proveedor Ejemplo', 'Temporal-123'),
+    ).resolves.toEqual({ id: 'user-id', username: 'proveedor@example.com' });
+
+    const createRequest = fetchMock.mock.calls[2][1] as RequestInit;
+    if (typeof createRequest.body !== 'string') {
+      throw new Error('Keycloak user creation request body must be JSON text.');
+    }
+    const createdUser = JSON.parse(createRequest.body) as {
+      username: string;
+      requiredActions: string[];
+      credentials: Array<{ value: string; temporary: boolean }>;
+    };
+    expect(createdUser.username).toBe('proveedor@example.com');
+    expect(createdUser.requiredActions).toContain('UPDATE_PASSWORD');
+    expect(createdUser.credentials[0]).toEqual({
+      type: 'password',
+      value: 'Temporal-123',
+      temporary: true,
+    });
+
+    const roleRequest = fetchMock.mock.calls[3][1] as RequestInit;
+    if (typeof roleRequest.body !== 'string') {
+      throw new Error('Keycloak role assignment request body must be JSON text.');
+    }
+    expect(JSON.parse(roleRequest.body)).toEqual([{ id: 'role-id', name: 'proveedor' }]);
+  });
+
+  it('creates an account without email using a generated username', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'service-token' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'role-id', name: 'proveedor' })))
+      .mockResolvedValueOnce(new Response(null, {
+        status: 201,
+        headers: { location: 'http://keycloak.test/admin/realms/ganon/users/user-id' },
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    const created = await service.createProviderUser(null, 'Proveedor Ejemplo', 'Temporal-123');
+    expect(created.id).toBe('user-id');
+    expect(created.username).toMatch(/^proveedor-[0-9a-f-]{36}$/i);
+
+    const createRequest = fetchMock.mock.calls[2][1] as RequestInit;
+    if (typeof createRequest.body !== 'string') {
+      throw new Error('Keycloak user creation request body must be JSON text.');
+    }
+    const createdUser = JSON.parse(createRequest.body) as {
+      username: string;
+      email?: string;
+    };
+    expect(createdUser.username).toBe(created.username);
+    expect(createdUser).not.toHaveProperty('email');
+  });
+
+  it('reports an existing Keycloak account without attempting role assignment', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'service-token' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'role-id', name: 'proveedor' })))
+      .mockResolvedValueOnce(new Response(null, { status: 409 }));
+
+    await expect(
+      service.createProviderUser('provider@example.com', 'Proveedor Ejemplo', 'Temporal-123'),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+

@@ -6,7 +6,6 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'node:crypto';
 
 interface KeycloakAdminSettings {
   baseUrl: string;
@@ -36,6 +35,7 @@ export class KeycloakAdminService {
   constructor(private readonly config: ConfigService) {}
 
   async createProviderUser(
+    username: string,
     email: string | null,
     supplierName: string,
     temporaryPassword: string,
@@ -44,7 +44,6 @@ export class KeycloakAdminService {
     const token = await this.accessToken(settings);
     const role = await this.findProviderRole(settings, token);
     const usersUrl = `${settings.baseUrl}/admin/realms/${encodeURIComponent(settings.realm)}/users`;
-    const username = email ?? `proveedor-${randomUUID()}`;
     const createResponse = await this.adminRequest(usersUrl, token, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -118,7 +117,7 @@ export class KeycloakAdminService {
     const currentEmail = typeof current.email === 'string' ? current.email : '';
     const currentUsername = typeof current.username === 'string' ? current.username : '';
     const emailChanged = currentEmail.toLowerCase() !== (email ?? '').toLowerCase();
-    const username = email ?? usernameOverride ?? currentUsername;
+    const username = usernameOverride ?? currentUsername;
     if (!username) {
       throw new ServiceUnavailableException(
         'La cuenta de Keycloak no tiene un nombre de usuario válido para actualizar.',

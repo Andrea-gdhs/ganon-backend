@@ -44,6 +44,10 @@ function isRecord(value: unknown): value is RecordData {
   );
 }
 
+function firstPresent(...values: unknown[]): unknown {
+  return values.find((value) => value !== undefined && value !== null && value !== '');
+}
+
 function requiredText(
   value: unknown,
   label: string,
@@ -170,7 +174,13 @@ function parsePurchaseOrder(value: unknown): PurchaseOrderInput {
       'La orden debe incluir un arreglo de partidas.',
     );
   }
+  if (value.lines.length === 0) {
+    throw new BadRequestException(
+      'La orden debe incluir al menos una partida de NetSuite.',
+    );
+  }
 
+  const lineIds = new Set<string>();
   const lines = value.lines.map((item, index) => {
     if (!isRecord(item)) {
       throw new BadRequestException(
@@ -178,8 +188,9 @@ function parsePurchaseOrder(value: unknown): PurchaseOrderInput {
       );
     }
 
+    const nestedItem = isRecord(item.item) ? item.item : null;
     const quantity = decimalValue(
-      item.quantity,
+      firstPresent(item.quantity, item.quantityOrdered, item.orderedQuantity),
       `Cantidad de la partida ${index + 1}`,
     );
 
@@ -194,30 +205,52 @@ function parsePurchaseOrder(value: unknown): PurchaseOrderInput {
       );
     }
 
-    return {
-      lineId: requiredText(
+    const lineId = requiredText(
+      firstPresent(
         item.lineId,
-        `ID de NetSuite de la partida ${index + 1}`,
-        200,
-      ),
-      lineNumber: optionalInteger(
+        item.netsuiteLineId,
+        item.netsuite_line_id,
         item.lineNumber,
+        item.lineNum,
+      ),
+      `ID de NetSuite de la partida ${index + 1}`,
+      200,
+    );
+    if (lineIds.has(lineId)) {
+      throw new BadRequestException(
+        `El ID de NetSuite de la partida ${index + 1} está repetido.`,
+      );
+    }
+    lineIds.add(lineId);
+
+    return {
+      lineId,
+      lineNumber: optionalInteger(
+        firstPresent(item.lineNumber, item.lineNum, item.sequenceNumber),
         `Número de partida ${index + 1}`,
       ),
-      itemId: optionalText(item.itemId, 'ID del artículo', 200),
-      sku: optionalText(item.sku, 'Código del artículo', 500),
+      itemId: optionalText(
+        firstPresent(item.itemId, item.itemInternalId, nestedItem?.internalId, nestedItem?.id),
+        'ID del artículo',
+        200,
+      ),
+      sku: optionalText(
+        firstPresent(item.sku, item.itemName, item.item_name, item.itemDisplayName, nestedItem?.name, nestedItem?.itemName),
+        'Código del artículo',
+        500,
+      ),
       description: optionalText(
-        item.description,
+        firstPresent(item.description, item.itemDescription, item.memo, nestedItem?.description),
         'Descripción del artículo',
       ),
       quantity,
       quantityReceived,
       unitPrice: decimalValue(
-        item.unitPrice,
+        firstPresent(item.unitPrice, item.rate),
         'Precio unitario',
       ),
-      amount: decimalValue(item.amount, 'Importe'),
-      units: optionalText(item.units, 'Unidad', 100),
+      amount: decimalValue(firstPresent(item.amount, item.grossAmount), 'Importe'),
+      units: optionalText(firstPresent(item.units, item.unit, item.unitName), 'Unidad', 100),
     };
   });
 

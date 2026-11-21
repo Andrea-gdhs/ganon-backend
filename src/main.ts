@@ -13,7 +13,7 @@ async function bootstrap() {
   app.enableCors({
     origin: origins,
     allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
-    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   });
   await app.listen(process.env.PORT ?? 3000);
 }

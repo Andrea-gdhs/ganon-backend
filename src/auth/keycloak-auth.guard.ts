@@ -131,6 +131,7 @@ export class KeycloakAuthGuard implements CanActivate {
       ['comprador', 'buyer', 'auxiliar', 'auxiliary', 'auxiliar de compras', 'auxiliar_compras']
         .some((role) => roles.has(role))
     ) return 'buyer';
+    if (['cedis', 'recepcion-cedis'].some((role) => roles.has(role))) return 'cedis';
     if (['proveedor', 'provider'].some((role) => roles.has(role))) return 'provider';
     return null;
   }

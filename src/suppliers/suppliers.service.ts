@@ -11,6 +11,7 @@ import { KeycloakAdminService } from './keycloak-admin.service';
 
 interface CreateSupplierInput {
   name: string;
+  username: string;
   email: string | null;
   phone: string | null;
   netsuiteVendorId: string | null;
@@ -60,6 +61,11 @@ function parseCreateSupplier(value: unknown): CreateSupplierInput {
   const name = optionalText(value.name, 'El nombre del proveedor', 200);
   if (!name) throw new BadRequestException('El nombre del proveedor es obligatorio.');
 
+  const username = optionalText(value.username, 'El usuario de acceso', 50);
+  if (!username || !/^[a-z0-9._-]{3,50}$/.test(username)) {
+    throw new BadRequestException('El usuario debe tener entre 3 y 50 caracteres y solo puede contener letras minúsculas, números, puntos, guiones y guiones bajos.');
+  }
+
   const email = optionalText(value.email, 'El correo del proveedor', 254)?.toLowerCase() ?? null;
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new BadRequestException('Ingresa un correo válido para la cuenta del proveedor.');
@@ -75,6 +81,7 @@ function parseCreateSupplier(value: unknown): CreateSupplierInput {
 
   return {
     name,
+    username,
     email,
     phone: optionalText(value.phone, 'El teléfono', 100),
     netsuiteVendorId: optionalText(value.netsuiteVendorId, 'El ID de NetSuite', 100),
@@ -88,6 +95,7 @@ function parseUpdateSupplier(value: unknown): UpdateSupplierInput {
   }
   const name = optionalText(value.name, 'El nombre del proveedor', 200);
   if (!name) throw new BadRequestException('El nombre del proveedor es obligatorio.');
+
 
   const email = optionalText(value.email, 'El correo del proveedor', 254)?.toLowerCase() ?? null;
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -134,6 +142,7 @@ export class SuppliersService {
     }
 
     const keycloakUser = await this.keycloakAdmin.createProviderUser(
+      input.username,
       input.email,
       input.name,
       input.temporaryPassword,
@@ -348,6 +357,101 @@ export class SuppliersService {
         }
       }
       throw error;
+    }
+  }
+
+  async delete(id: string): Promise<void> {
+    if (!isSupplierId(id)) {
+      throw new BadRequestException('El ID interno del proveedor no es válido.');
+    }
+
+    let keycloakUserIds: string[];
+    try {
+      keycloakUserIds = await this.dataSource.transaction(async (manager) => {
+        const supplierRows = (await manager.query(
+          `SELECT id, active FROM suppliers WHERE id = $1 FOR UPDATE`,
+          [id],
+        )) as Array<{ id: string; active: boolean }>;
+        const supplier = supplierRows[0];
+        if (!supplier) throw new NotFoundException('No se encontró el proveedor.');
+        if (supplier.active) {
+          throw new ConflictException(
+            'Desactiva el proveedor antes de eliminarlo permanentemente.',
+          );
+        }
+
+        const historyRows = (await manager.query(
+          `SELECT
+             EXISTS(SELECT 1 FROM purchase_orders WHERE supplier_id = $1) AS has_orders,
+             EXISTS(SELECT 1 FROM evaluations WHERE supplier_id = $1) AS has_evaluations,
+             EXISTS(SELECT 1 FROM supplier_commitments WHERE supplier_id = $1) AS has_commitments`,
+          [id],
+        )) as Array<{
+          has_orders: boolean;
+          has_evaluations: boolean;
+          has_commitments: boolean;
+        }>;
+        const history = historyRows[0];
+        if (!history) {
+          throw new InternalServerErrorException(
+            'No se pudo verificar si el proveedor tiene historial.',
+          );
+        }
+        if (history.has_orders || history.has_evaluations || history.has_commitments) {
+          throw new ConflictException(
+            'No se puede eliminar permanentemente este proveedor porque tiene órdenes, evaluaciones u otro historial asociado. Se conservó su registro.',
+          );
+        }
+
+        const linkedUsers = (await manager.query(
+          `SELECT keycloak_user_id FROM portal_users
+           WHERE supplier_id = $1 AND role IN ('provider', 'proveedor')`,
+          [id],
+        )) as Array<{ keycloak_user_id: string | null }>;
+        await manager.query(
+          `DELETE FROM portal_users
+           WHERE supplier_id = $1 AND role IN ('provider', 'proveedor')`,
+          [id],
+        );
+        const deletedRows = (await manager.query(
+          `DELETE FROM suppliers WHERE id = $1 RETURNING id`,
+          [id],
+        )) as Array<{ id: string }>;
+        if (!deletedRows[0]) throw new NotFoundException('No se encontró el proveedor.');
+
+        return [
+          ...new Set(
+            linkedUsers
+              .map((user) => user.keycloak_user_id)
+              .filter((userId): userId is string => typeof userId === 'string' && !!userId),
+          ),
+        ];
+      });
+    } catch (error) {
+      const driverError =
+        isRecord(error) && isRecord(error.driverError) ? error.driverError : null;
+      const code =
+        isRecord(error) && typeof error.code === 'string'
+          ? error.code
+          : typeof driverError?.code === 'string'
+            ? driverError.code
+            : null;
+      if (code === '23503') {
+        throw new ConflictException(
+          'No se puede eliminar permanentemente este proveedor porque tiene órdenes, evaluaciones u otro historial asociado. Se conservó su registro.',
+        );
+      }
+      throw error;
+    }
+
+    for (const keycloakUserId of keycloakUserIds) {
+      try {
+        await this.keycloakAdmin.deleteProviderUser(keycloakUserId);
+      } catch {
+        throw new InternalServerErrorException(
+          'El proveedor se eliminó de PostgreSQL, pero no se pudo eliminar su cuenta de Keycloak. Verifica ambos sistemas.',
+        );
+      }
     }
   }
 

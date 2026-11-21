@@ -17,7 +17,13 @@ import {
   CommitmentOption,
   getCommitmentOption,
 } from './evaluation-catalog';
-import { calculateOtifMetrics, OtifMetrics, PerformanceLine } from './evaluation-metrics';
+import {
+  calculateManualEvaluation,
+  calculateOtifMetrics,
+  ManualEvaluationInputs,
+  OtifMetrics,
+  PerformanceLine,
+} from './evaluation-metrics';
 
 type SqlExecutor = Pick<EntityManager, 'query'>;
 
@@ -33,6 +39,12 @@ export interface SupplierRow {
   email: string | null;
 }
 
+export interface SupplierCatalogRow {
+  id: string;
+  name: string;
+  active: boolean;
+}
+
 interface PerformanceRow {
   expected_delivery_date: string;
   first_receipt_date: string | null;
@@ -43,14 +55,26 @@ interface PerformanceRow {
 
 interface SupplierOrderLineRow {
   order_id: string;
+  order_number: string;
   order_date: string;
   expected_delivery_date: string | null;
   line_id: string;
-  line_number: string | number;
+  line_number: string | number | null;
   item_id: string | null;
+  item_name: string | null;
+  description: string;
+  unit: string | null;
   ordered_quantity: string;
   delivered_quantity: string;
 }
+
+const EMPTY_MANUAL_EVALUATION: ManualEvaluationInputs = {
+  openQualityCases: null,
+  closedQualityCases: null,
+  billingIncidents: null,
+  returnIncidents: null,
+  criticalityLevel: null,
+};
 
 interface EvaluationRow {
   id: string;
@@ -116,6 +140,33 @@ function decimalValue(value: unknown, label: string): number | null {
     throw new BadRequestException(`${label} debe ser un porcentaje de 0 a 100.`);
   }
   return result;
+}
+
+function nonnegativeInteger(value: unknown, label: string): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const result = Number(value);
+  if (!Number.isSafeInteger(result) || result < 0) {
+    throw new BadRequestException(`${label} debe ser un entero no negativo.`);
+  }
+  return result;
+}
+
+function parseManualEvaluation(value: unknown): ManualEvaluationInputs {
+  if (value === undefined || value === null) return EMPTY_MANUAL_EVALUATION;
+  if (!isRecord(value)) {
+    throw new BadRequestException('Los datos manuales de la evaluación no son válidos.');
+  }
+  const criticalityLevel = stringValue(value.criticalityLevel, 'La criticidad');
+  if (criticalityLevel && !['Bajo', 'Medio', 'Alto'].includes(criticalityLevel)) {
+    throw new BadRequestException('La criticidad debe ser Bajo, Medio o Alto.');
+  }
+  return {
+    openQualityCases: nonnegativeInteger(value.openQualityCases, 'Los casos abiertos'),
+    closedQualityCases: nonnegativeInteger(value.closedQualityCases, 'Los casos cerrados'),
+    billingIncidents: nonnegativeInteger(value.billingIncidents, 'Las incidencias de facturación'),
+    returnIncidents: nonnegativeInteger(value.returnIncidents, 'Las devoluciones'),
+    criticalityLevel: criticalityLevel || null,
+  };
 }
 
 function validDate(value: unknown, label: string): string {
@@ -289,13 +340,21 @@ export class EvaluationsService {
     )) as SupplierRow[];
   }
 
+  async getSupplierCatalog(): Promise<SupplierCatalogRow[]> {
+    return (await this.dataSource.query(
+      `SELECT id, name, active FROM suppliers ORDER BY name`,
+    )) as SupplierCatalogRow[];
+  }
+
   async getSupplierOrderHistory(supplierId: string): Promise<Record<string, unknown>[]> {
     await this.requireSupplier(supplierId);
     const rows = (await this.dataSource.query(
       `SELECT po.id::text AS order_id,
+              po.po_number AS order_number,
               po.order_date::date::text AS order_date,
               po.expected_delivery_date::date::text AS expected_delivery_date,
               pol.id::text AS line_id, pol.line_number, pol.item_id::text AS item_id,
+              pol.item_name, COALESCE(pol.description, '') AS description, pol.unit,
               pol.quantity_ordered::text AS ordered_quantity,
               COALESCE(
                 SUM(rl.quantity_delivered) FILTER (
@@ -314,6 +373,7 @@ export class EvaluationsService {
     )) as SupplierOrderLineRow[];
     const orders = new Map<string, {
       id: string;
+      orderNumber: string;
       orderDate: string;
       expectedDeliveryDate: string | null;
       lines: Array<Record<string, unknown>>;
@@ -323,6 +383,7 @@ export class EvaluationsService {
       if (!order) {
         order = {
           id: row.order_id,
+          orderNumber: row.order_number,
           orderDate: row.order_date,
           expectedDeliveryDate: row.expected_delivery_date,
           lines: [],
@@ -335,9 +396,12 @@ export class EvaluationsService {
         id: row.line_id,
         lineNumber: row.line_number,
         itemId: row.item_id,
+        sku: row.item_name,
+        description: row.description,
         orderedQuantity,
         deliveredQuantity,
         pendingQuantity: Math.max(0, orderedQuantity - deliveredQuantity),
+        unit: row.unit,
       });
     }
     return [...orders.values()];
@@ -394,7 +458,7 @@ async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
     total_amount: string;
     currency: string;
     line_id: string;
-    line_number: string | number;
+    line_number: string | number | null;
     item_id: string | null;
     item_name: string;
     description: string;
@@ -490,7 +554,13 @@ async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
   ): Promise<Record<string, unknown>> {
     await this.requireSupplier(supplierId);
     const period = parsePeriod(periodType, periodStart, periodEnd);
-    return this.buildSnapshot(this.dataSource, supplierId, period, null);
+    return this.buildSnapshot(
+      this.dataSource,
+      supplierId,
+      period,
+      null,
+      EMPTY_MANUAL_EVALUATION,
+    );
   }
 
   async createEvaluation(user: PortalAuthUser, value: unknown): Promise<Record<string, unknown>> {
@@ -499,6 +569,7 @@ async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
     const supplier = await this.requireSupplier(supplierId);
     const period = parsePeriod(value.periodType, value.periodStart, value.periodEnd);
     const sellOut = decimalValue(value.sellOutPercentage, 'Sell Out');
+    const manualEvaluation = parseManualEvaluation(value.manualEvaluation);
     const commitments = parseCommitments(value.commitments);
     const signers = parseSigners(value.signers);
     const comments = stringValue(value.comments, 'Los comentarios');
@@ -507,7 +578,13 @@ async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
     const supplierEmail = stringValue(value.supplierEmail, 'El correo del proveedor') || supplier.email || '';
     const supplierExtension = stringValue(value.supplierExtension, 'La extensión del proveedor');
     const evaluationId = randomUUID();
-    const snapshot = await this.buildSnapshot(this.dataSource, supplierId, period, sellOut);
+    const snapshot = await this.buildSnapshot(
+      this.dataSource,
+      supplierId,
+      period,
+      sellOut,
+      manualEvaluation,
+    );
     const preparedSigners = await this.writeSignatures(evaluationId, signers);
     const snapshotJson = JSON.stringify(snapshot);
 
@@ -520,7 +597,7 @@ async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
              supplier_contact_role, supplier_email, supplier_extension, score,
              comments, status, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, $6, $7, $8, $9, $10, $11, $12,
-                   NULL, $13, 'draft', NOW(), NOW())`,
+                    $13, $14, $15, NOW(), NOW())`,
           [
             evaluationId,
             supplierId,
@@ -534,7 +611,9 @@ async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
             supplierContactRole || null,
             supplierEmail || null,
             supplierExtension || null,
+            snapshot.finalScore,
             comments || null,
+            snapshot.evaluationStatus,
           ],
         );
         await this.saveCriteria(manager, evaluationId, snapshot, snapshotJson);
@@ -779,6 +858,7 @@ async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
     supplierId: string,
     period: PeriodRange,
     sellOutPercentage: number | null,
+    manualInputs: ManualEvaluationInputs,
   ): Promise<Record<string, unknown>> {
     const today = new Date().toISOString().slice(0, 10);
     const orderRows = (await executor.query(
@@ -832,32 +912,34 @@ async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
         firstItemsMatch: row.first_items_match,
       })),
     );
-    const criticalityLevel =
-      sellOutPercentage === null
-        ? null
-        : sellOutPercentage >= 85
-          ? 'Confiable'
-          : sellOutPercentage >= 75
-            ? 'Con Riesgo'
-            : 'No Confiable';
+    const manualEvaluation = calculateManualEvaluation(metrics.otif, manualInputs);
+    const dataPending = {
+      itemVerification: metrics.itemVerificationPending > 0,
+      otif: metrics.otif === null,
+      quality: manualEvaluation.totalQualityCases === null,
+      billing: manualInputs.billingIncidents === null,
+      returns: manualInputs.returnIncidents === null,
+      incidents: manualEvaluation.incidentPercentage === null,
+      sellOut: sellOutPercentage === null,
+      criticality: manualInputs.criticalityLevel === null,
+    };
+    const evaluationStatus = Object.values(dataPending).some(Boolean)
+      ? 'draft'
+      : 'published';
 
     return {
       asOf: today,
       orderCount: orderRows[0]?.count ?? 0,
       otif: metrics,
       sellOutPercentage,
-      criticalityLevel,
-      dataPending: {
-        itemVerification: metrics.itemVerificationPending > 0,
-        quality: true,
-        billing: true,
-        returns: true,
-        incidents: true,
-      },
-      finalScore: null,
-      classification: null,
-      recommendation: null,
-      evaluationStatus: 'draft',
+      criticalityLevel: manualInputs.criticalityLevel,
+      manualInputs,
+      manualEvaluation,
+      dataPending,
+      finalScore: manualEvaluation.finalScore,
+      classification: manualEvaluation.classification,
+      recommendation: manualEvaluation.recommendation,
+      evaluationStatus,
     };
   }
 
@@ -868,6 +950,10 @@ async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
     snapshotJson: string,
   ): Promise<void> {
     const metrics = snapshot.otif as OtifMetrics;
+    const manualInputs = snapshot.manualInputs as ManualEvaluationInputs;
+    const manualEvaluation = snapshot.manualEvaluation as ReturnType<
+      typeof calculateManualEvaluation
+    >;
     const sellOut = snapshot.sellOutPercentage;
     const rows: Array<[string, string, number | null, string | null]> = [
       ['operativo', 'Órdenes emitidas', Number(snapshot.orderCount), null],
@@ -879,9 +965,16 @@ async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
       ['operativo', 'In Full (%)', metrics.inFullRate === null ? null : metrics.inFullRate * 100, null],
       ['operativo', 'OTIF (%)', metrics.otif === null ? null : metrics.otif * 100, null],
       ['operativo', 'Validación de artículo pendiente', null, String(metrics.itemVerificationPending)],
-      ['calidad', 'Calidad de producto', null, 'Pendiente de integrar una fuente de calidad.'],
-      ['incidencias', 'Facturación', null, 'Pendiente de integrar una fuente de facturación.'],
-      ['incidencias', 'Devoluciones', null, 'Pendiente de integrar una fuente de devoluciones.'],
+      ['calidad', 'Casos abiertos', manualInputs.openQualityCases, null],
+      ['calidad', 'Casos cerrados', manualInputs.closedQualityCases, null],
+      ['calidad', 'No. total de casos', manualEvaluation.totalQualityCases, null],
+      ['calidad', 'Puntos de calidad', manualEvaluation.qualityPenalty, null],
+      ['incidencias', 'Facturación', manualInputs.billingIncidents, null],
+      ['incidencias', 'Puntos de facturación', manualEvaluation.billingPenalty, null],
+      ['incidencias', 'Devoluciones', manualInputs.returnIncidents, null],
+      ['incidencias', 'Puntos de devolución', manualEvaluation.returnPenalty, null],
+      ['incidencias', 'No. total de incidencias', manualEvaluation.totalIncidents, null],
+      ['incidencias', '% Incidencias', manualEvaluation.incidentPercentage, null],
       ['comercial', 'Sell Out (%)', typeof sellOut === 'number' ? sellOut : null, null],
       [
         'comercial',
@@ -889,9 +982,9 @@ async getPortalOrders(supplierId?: string): Promise<Record<string, unknown>[]> {
         null,
         typeof snapshot.criticalityLevel === 'string'
           ? snapshot.criticalityLevel
-          : 'Pendiente de captura de Sell Out.',
+          : 'Pendiente de captura.',
       ],
-      ['resumen', 'Resultado final', null, 'Pendiente de integrar fuentes de incidencias.'],
+      ['resumen', 'Resultado final', manualEvaluation.finalScore, manualEvaluation.classification],
       ['resumen', 'snapshot', null, snapshotJson],
     ];
     for (const [category, criterionName, score, comments] of rows) {
